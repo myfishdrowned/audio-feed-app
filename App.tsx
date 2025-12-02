@@ -460,25 +460,43 @@ export default function App() {
   }, [simulateBle, mappings, sounds, onTrigger]);
 
   const handleImport = useCallback(async () => {
-    const result = await DocumentPicker.getDocumentAsync({
-      type: 'audio/*',
-      multiple: false,
-      copyToCacheDirectory: true,
-    });
-    if (result.canceled) return;
-    const file = result.assets?.[0];
-    if (!file?.uri) return;
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: 'audio/*',
+        multiple: false,
+        copyToCacheDirectory: true,
+      });
+      if (result.canceled) {
+        setMessage('Import canceled.');
+        return;
+      }
+      const file = result.assets?.[0];
+      if (!file?.uri) {
+        setMessage('No file selected (picker returned empty).');
+        return;
+      }
 
-    const extension = file.name?.split('.').pop() ?? 'm4a';
-    const destination = `${FileSystem.documentDirectory}audio-${Date.now()}.${extension}`;
-    await FileSystem.copyAsync({ from: file.uri, to: destination });
-    const newSound: SoundItem = {
-      id: randomId(),
-      name: file.name?.replace(/\.[^/.]+$/, '') || 'New sound',
-      uri: destination,
-    };
-    setSounds((prev) => [...prev, newSound]);
-    setMessage(`Imported: ${newSound.name}`);
+      const extension = file.name?.split('.').pop() ?? 'm4a';
+      const destination = `${FileSystem.documentDirectory}audio-${Date.now()}.${extension}`;
+      await FileSystem.copyAsync({ from: file.uri, to: destination });
+      const info = await FileSystem.getInfoAsync(destination);
+      if (!info.exists) {
+        setMessage('Import failed: copied file not found.');
+        return;
+      }
+      const newSound: SoundItem = {
+        id: randomId(),
+        name: file.name?.replace(/\.[^/.]+$/, '') || 'New sound',
+        uri: destination,
+      };
+      setSounds((prev) => [...prev, newSound]);
+      setMessage(`Imported: ${newSound.name}`);
+    } catch (error) {
+      console.warn('Import failed', error);
+      setMessage(
+        `Import failed. ${error instanceof Error ? error.message : 'Try again or use the sample tone.'}`,
+      );
+    }
   }, []);
 
   const handleRename = useCallback((id: string, name: string) => {
