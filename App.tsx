@@ -2,12 +2,12 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { NavigationContainer, DarkTheme } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Audio } from 'expo-av';
-import { Asset } from 'expo-asset';
 import * as DocumentPicker from 'expo-document-picker';
-import * as FileSystem from 'expo-file-system';
+// Use legacy API to keep copyAsync and deleteAsync without refactor
+import * as FileSystem from 'expo-file-system/legacy';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { StatusBar } from 'expo-status-bar';
-import { Alert, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { Alert, Animated, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 
 type Gesture = 'short' | 'long' | 'double';
 
@@ -99,6 +99,7 @@ async function saveMappings(mappings: Mapping) {
 function useAudioPlayer() {
   const soundRef = useRef<Audio.Sound | null>(null);
   const [currentId, setCurrentId] = useState<string | null>(null);
+  const [playbackState, setPlaybackState] = useState<'playing' | 'paused' | null>(null);
 
   useEffect(() => {
     Audio.setAudioModeAsync({
@@ -126,6 +127,7 @@ function useAudioPlayer() {
     await soundRef.current.unloadAsync();
     soundRef.current = null;
     setCurrentId(null);
+    setPlaybackState(null);
   }, []);
 
   const play = useCallback(
@@ -137,17 +139,40 @@ function useAudioPlayer() {
       );
       soundRef.current = loadedSound;
       setCurrentId(sound.id);
+      setPlaybackState('playing');
       loadedSound.setOnPlaybackStatusUpdate((status) => {
         if (!status.isLoaded) return;
+        setPlaybackState(status.isPlaying ? 'playing' : 'paused');
         if (status.didJustFinish) {
           setCurrentId(null);
+          setPlaybackState(null);
         }
       });
     },
     [stop],
   );
 
-  return { play, stop, currentId };
+  const pause = useCallback(async () => {
+    if (!soundRef.current) return;
+    try {
+      await soundRef.current.pauseAsync();
+      setPlaybackState('paused');
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const resume = useCallback(async () => {
+    if (!soundRef.current) return;
+    try {
+      await soundRef.current.playAsync();
+      setPlaybackState('playing');
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  return { play, stop, pause, resume, currentId, playbackState };
 }
 
 function SectionHeader({ title, action }: { title: string; action?: React.ReactNode }) {
@@ -186,12 +211,22 @@ function PrimaryButton({
 function OutlineButton({
   label,
   onPress,
+  disabled,
 }: {
   label: string;
   onPress: () => void;
+  disabled?: boolean;
 }) {
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.outlineButton, pressed && styles.buttonPressed]}>
+    <Pressable
+      onPress={onPress}
+      disabled={disabled}
+      style={({ pressed }) => [
+        styles.outlineButton,
+        disabled && styles.buttonDisabled,
+        pressed && !disabled && styles.buttonPressed,
+      ]}
+    >
       <Text style={styles.outlineButtonLabel}>{label}</Text>
     </Pressable>
   );
@@ -218,6 +253,10 @@ function LibraryScreen({
   onRename,
   onDelete,
   onPlay,
+  onPause,
+  onResume,
+  statusMessage,
+  playbackState,
 }: {
   sounds: SoundItem[];
   currentId: string | null;
@@ -225,10 +264,21 @@ function LibraryScreen({
   onRename: (id: string, name: string) => void;
   onDelete: (id: string) => void;
   onPlay: (sound: SoundItem) => void;
+  onPause: () => void;
+  onResume: () => void;
+  statusMessage: string | null;
+  playbackState: 'playing' | 'paused' | null;
 }) {
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.screenContent}>
-      <SectionHeader title="Audio Library" action={<PrimaryButton label="Import audio" onPress={onImport} />} />
+      <SectionHeader
+        title="Audio Library"
+        action={
+          <View style={styles.actionsRow}>
+            <PrimaryButton label="Import audio" onPress={onImport} />
+          </View>
+        }
+      />
       {sounds.length === 0 ? (
         <Text style={styles.muted}>No audio yet. Import any mp3/wav/m4a.</Text>
       ) : (
@@ -243,10 +293,34 @@ function LibraryScreen({
                   placeholder="Name"
                   placeholderTextColor={colors.muted}
                 />
-                <Pill label={currentId === sound.id ? 'Playing' : 'Ready'} active={currentId === sound.id} />
+                <Pill
+                  label={
+                    currentId === sound.id
+                      ? playbackState === 'paused'
+                        ? 'Paused'
+                        : 'Playing'
+                      : 'Ready'
+                  }
+                  active={currentId === sound.id}
+                />
               </View>
               <View style={styles.soundActions}>
                 <PrimaryButton label="Play" onPress={() => onPlay(sound)} />
+                <OutlineButton
+                  label={
+                    currentId === sound.id && playbackState === 'paused'
+                      ? 'Resume'
+                      : 'Pause'
+                  }
+                  onPress={() => {
+                    if (currentId === sound.id && playbackState === 'paused') {
+                      onResume();
+                    } else {
+                      onPause();
+                    }
+                  }}
+                  disabled={!(currentId === sound.id && playbackState)}
+                />
                 <OutlineButton
                   label="Delete"
                   onPress={() => onDelete(sound.id)}
@@ -256,6 +330,11 @@ function LibraryScreen({
           ))}
         </View>
       )}
+      {statusMessage ? (
+        <View style={styles.message}>
+          <Text style={styles.messageText}>{statusMessage}</Text>
+        </View>
+      ) : null}
     </ScrollView>
   );
 }
@@ -401,6 +480,65 @@ function TestScreen({
   );
 }
 
+function ActionsScreen({
+  sounds,
+  currentId,
+  playbackState,
+  onPlay,
+  onPause,
+  onResume,
+}: {
+  sounds: SoundItem[];
+  currentId: string | null;
+  playbackState: 'playing' | 'paused' | null;
+  onPlay: (sound: SoundItem) => void;
+  onPause: () => void;
+  onResume: () => void;
+}) {
+  return (
+    <ScrollView style={styles.screen} contentContainerStyle={styles.screenContent}>
+      <SectionHeader title="Actions" />
+      {sounds.length === 0 ? (
+        <Text style={styles.muted}>Import audio in Library, then trigger from here.</Text>
+      ) : (
+        <View style={styles.actionGrid}>
+          {sounds.map((sound) => {
+            const isCurrent = currentId === sound.id;
+            const isPaused = playbackState === 'paused' && isCurrent;
+            return (
+              <Pressable
+                key={sound.id}
+                onPress={() => onPlay(sound)}
+                style={({ pressed }) => [
+                  styles.actionTile,
+                  isCurrent && styles.actionTileActive,
+                  pressed && styles.buttonPressed,
+                ]}
+              >
+                <Text style={styles.actionTitle}>{sound.name}</Text>
+                <View style={styles.actionRow}>
+                  <Pill
+                    label={isCurrent ? (isPaused ? 'Paused' : 'Playing') : 'Ready'}
+                    active={isCurrent}
+                  />
+                  {isCurrent ? (
+                    <OutlineButton
+                      label={isPaused ? 'Resume' : 'Pause'}
+                      onPress={isPaused ? onResume : onPause}
+                    />
+                  ) : (
+                    <PrimaryButton label="Play" onPress={() => onPlay(sound)} />
+                  )}
+                </View>
+              </Pressable>
+            );
+          })}
+        </View>
+      )}
+    </ScrollView>
+  );
+}
+
 export default function App() {
   const [sounds, setSounds] = useState<SoundItem[]>([]);
   const [mappings, setMappings] = useState<Mapping>({});
@@ -408,6 +546,8 @@ export default function App() {
   const [message, setMessage] = useState<string | null>(null);
   const [simulateBle, setSimulateBle] = useState(false);
   const [isReady, setIsReady] = useState(false);
+  const [introDone, setIntroDone] = useState(false);
+  const fireAnim = useRef(new Animated.Value(0));
   const audio = useAudioPlayer();
 
   useEffect(() => {
@@ -417,6 +557,22 @@ export default function App() {
       setMappings(savedMappings);
       setIsReady(true);
     })();
+  }, []);
+
+  useEffect(() => {
+    const id = setTimeout(() => setIntroDone(true), 3000);
+    return () => clearTimeout(id);
+  }, []);
+
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(fireAnim.current, { toValue: 1, duration: 900, useNativeDriver: false }),
+        Animated.timing(fireAnim.current, { toValue: 0, duration: 700, useNativeDriver: false }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
   }, []);
 
   useEffect(() => {
@@ -547,6 +703,46 @@ export default function App() {
     [],
   );
 
+  if (!introDone) {
+    const fireColor = fireAnim.current.interpolate({
+      inputRange: [0, 1],
+      outputRange: ['#ffcf32', '#ff7f00'],
+    });
+    const fireRadius = fireAnim.current.interpolate({
+      inputRange: [0, 1],
+      outputRange: [4, 10],
+    });
+
+    return (
+      <View style={styles.introScreen}>
+        <StatusBar style="light" />
+        <View style={styles.introLogoPill}>
+          <Animated.Text
+            style={[
+              styles.introFireText,
+              {
+                color: fireColor,
+                textShadowRadius: fireRadius as unknown as number,
+              },
+            ]}
+          >
+            Aura Farmer
+          </Animated.Text>
+        </View>
+        <View style={styles.introArt}>
+          <View style={styles.introShape} />
+          <View style={styles.introShapeAlt} />
+          <Text style={styles.introIcon}>🎧</Text>
+        </View>
+        <Text style={styles.introTitle}>Welcome to the Aura Farming App</Text>
+        <Text style={styles.introSubtitle}>Craft, map, and trigger your audio moments in seconds.</Text>
+        <View style={styles.introProgressBar}>
+          <View style={styles.introProgressFill} />
+        </View>
+      </View>
+    );
+  }
+
   return (
     <NavigationContainer theme={navigationTheme}>
       <StatusBar style="light" />
@@ -564,13 +760,31 @@ export default function App() {
             <LibraryScreen
               sounds={sounds}
               currentId={audio.currentId}
+              playbackState={audio.playbackState}
               onImport={handleImport}
               onRename={handleRename}
               onDelete={handleDelete}
               onPlay={(sound) => {
-                setMessage(`Preview: ${sound.name}`);
-                audio.play(sound);
+                (async () => {
+                  try {
+                    setMessage(`Preview: ${sound.name}`);
+                    await audio.play(sound);
+                  } catch (err) {
+                    setMessage('Could not play audio.');
+                  }
+                })();
               }}
+              onPause={() => {
+                (async () => {
+                  await audio.pause();
+                })();
+              }}
+              onResume={() => {
+                (async () => {
+                  await audio.resume();
+                })();
+              }}
+              statusMessage={message}
             />
           )}
         </Tab.Screen>
@@ -580,6 +794,35 @@ export default function App() {
               sounds={sounds}
               mappings={mappings}
               onSetMapping={handleSetMapping}
+            />
+          )}
+        </Tab.Screen>
+        <Tab.Screen name="Actions">
+          {() => (
+            <ActionsScreen
+              sounds={sounds}
+              currentId={audio.currentId}
+              playbackState={audio.playbackState}
+              onPlay={(sound) => {
+                (async () => {
+                  try {
+                    setMessage(`Playing: ${sound.name}`);
+                    await audio.play(sound);
+                  } catch (err) {
+                    setMessage('Could not play audio.');
+                  }
+                })();
+              }}
+              onPause={() => {
+                (async () => {
+                  await audio.pause();
+                })();
+              }}
+              onResume={() => {
+                (async () => {
+                  await audio.resume();
+                })();
+              }}
             />
           )}
         </Tab.Screen>
@@ -601,6 +844,89 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
+  introScreen: {
+    flex: 1,
+    backgroundColor: colors.background,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+    gap: 16,
+  },
+  introLogoPill: {
+    backgroundColor: colors.surface,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: colors.border,
+    shadowColor: '#ff9b00',
+    shadowOpacity: 0.35,
+    shadowRadius: 12,
+  },
+  introFireText: {
+    fontSize: 18,
+    fontWeight: '800',
+    letterSpacing: 0.6,
+    textShadowColor: '#ff5e00',
+  },
+  introArt: {
+    width: '100%',
+    height: 240,
+    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  introShape: {
+    position: 'absolute',
+    width: '78%',
+    height: '68%',
+    borderRadius: 30,
+    backgroundColor: colors.surface,
+    opacity: 0.6,
+    transform: [{ rotate: '-6deg' }],
+  },
+  introShapeAlt: {
+    position: 'absolute',
+    width: '70%',
+    height: '60%',
+    borderRadius: 26,
+    backgroundColor: colors.surfaceAlt,
+    opacity: 0.7,
+    transform: [{ rotate: '8deg' }],
+  },
+  introIcon: {
+    fontSize: 72,
+    zIndex: 2,
+  },
+  introTitle: {
+    color: colors.text,
+    fontSize: 22,
+    fontWeight: '800',
+    textAlign: 'center',
+  },
+  introSubtitle: {
+    color: colors.muted,
+    fontSize: 14,
+    textAlign: 'center',
+  },
+  introProgress: {
+    flexDirection: 'row',
+    gap: 6,
+    alignItems: 'center',
+  },
+  introProgressBar: {
+    width: 90,
+    height: 10,
+    borderRadius: 999,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    overflow: 'hidden',
+  },
+  introProgressFill: {
+    flex: 1,
+    backgroundColor: colors.accent,
+  },
   screen: {
     flex: 1,
     backgroundColor: colors.background,
@@ -786,6 +1112,36 @@ const styles = StyleSheet.create({
   },
   triggerMeta: {
     color: colors.muted,
+  },
+  actionGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+  },
+  actionTile: {
+    width: '48%',
+    backgroundColor: colors.surface,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 12,
+    gap: 8,
+  },
+  actionTileActive: {
+    borderColor: colors.accent,
+    shadowColor: colors.accent,
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
+  },
+  actionTitle: {
+    color: colors.text,
+    fontWeight: '700',
+  },
+  actionRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 8,
   },
   message: {
     marginTop: 12,
